@@ -1,0 +1,384 @@
+---
+title: "COVID-19 webpage"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+    source_code: embed
+    theme: cosmo
+runtime: shiny
+resource_files:
+- TM_WORLD_BORDERS_SIMPL-0.3.dbf
+- TM_WORLD_BORDERS_SIMPL-0.3.prj
+- TM_WORLD_BORDERS_SIMPL-0.3.shp
+- TM_WORLD_BORDERS_SIMPL-0.3.shx
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(rvest)
+library(xml2)
+library(stringr)
+library(leaflet)
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+library(ggiraph)
+library(plotly)
+library(usmap)
+library(shiny)
+library(tidyverse)
+library(magrittr)
+library(reshape2)
+library(countrycode)
+library(rworldmap)
+library(rgdal)
+library(rgeos)
+library(devtools)
+library(tweenr)
+library(curl)
+library(viridis)
+library(maps)
+library(plyr)
+```
+
+Country with travel restriction {.sidebar}
+================================================================
+
+```{r}
+a = Sys.time()
+a = .POSIXct(a, "EST5EDT")
+renderText(paste('Last Updated on:',a, 'EDT'))
+```
+
+### Country with travel restriction  
+
+These countries are listed with Level 3 Travel Health Notice by the CDC:
+
+```{r}
+# Download world information
+xhw = xml2::read_html("https://www.worldometers.info/coronavirus/")
+tcounts = xhw %>%
+  html_nodes('#maincounter-wrap span') %>%
+  html_text() %>%
+  str_remove_all(' ') %>%
+  str_remove_all(',') %>%
+  as.numeric()
+  
+# Country information
+countrytable = xhw %>%
+  html_nodes('td') %>%
+  html_text() %>%
+  str_remove_all(' ') %>%
+  str_remove_all(',') %>%
+  str_remove_all('\n')
+rows = length(countrytable)/9
+countrytable = countrytable %>%
+  matrix(9,rows) %>%
+  t()
+countrytable = countrytable[1:rows-1,]
+countrytable = as.data.frame(countrytable, stringsAsFactors=FALSE)
+countrytable = countrytable[1:which(grepl('Total:',countrytable$V1))-1,]
+
+# Lat and Lng info for each country
+countries = xml2::read_html("https://developers.google.com/public-data/docs/canonical/countries_csv")
+countriesloc = countries %>%
+  html_nodes('td') %>%
+  html_text() %>%
+  str_remove_all(' ') %>%
+  matrix(4,245) %>%
+  t() %>%
+  as.data.frame(stringsAsFactors=FALSE)
+colnames(countriesloc) = c('abb','lat','lng','cname')
+countriesloc[228,'cname'] = 'USA'
+countrytable = countrytable[countrytable[['V1']] %in% countriesloc[['cname']], ]
+countrydata = merge(countriesloc, countrytable, by.x='cname',by.y='V1')
+
+# List all level 3 countries
+level3 = xml2::read_html("https://www.cdc.gov/coronavirus/2019-ncov/travelers/after-travel-precautions.html")
+l3 = level3 %>%
+  html_nodes('.col-md-6 li') %>%
+  html_text() %>%
+  as.data.frame()
+renderTable(l3, colnames=FALSE)
+
+# Codes for United States
+#load usa coronavirus data
+usadat <- read_html("https://www.worldometers.info/coronavirus/country/us/")
+usadf <- html_table(usadat,fill=TRUE)[[1]]
+
+# buid a new usa dataframe 
+state <- usadf$USAState
+number <- length(state)
+state <- state[-number] 
+Totalcase <- usadf$TotalCases
+Totalcase <- Totalcase[-number]
+Totalcase <- as.numeric(gsub(",","",Totalcase))
+usadfnew <- data.frame(state,Totalcase)
+usadfnew$hover <- with(usadfnew, paste(state, '<br>', "case number:", Totalcase))
+
+#combine state code 
+dfstatecode <- read.csv("https://raw.githubusercontent.com/jasonong/List-of-US-States/master/states.csv")
+usadfnew$code <- dfstatecode$Abbreviation[match(usadfnew$state, dfstatecode$State)]
+
+# light grey boundaries
+l <- list(color = toRGB("white"), width = 2)
+
+# specify map projection/options
+g <- list(
+  scope = 'usa',
+  projection = list(type = 'albers usa'),
+  showlakes = TRUE,
+  lakecolor = toRGB('white')
+)
+```
+
+World
+================================================================
+
+Row {data-height=180}
+----------------------------------------------------------------
+
+### Total Cases {.value-box}
+
+```{r}
+renderValueBox({
+  valueBox(
+    value = tcounts[1],
+    icon = "fa-globe-asia"
+  )
+})
+```
+
+### Total Deaths {.value-box}
+
+```{r}
+renderValueBox({
+  valueBox(
+    value = tcounts[2],
+    icon = "fa-procedures"
+  )
+})
+```
+
+### Total Recovered {.value-box}
+
+```{r}
+renderValueBox({
+  valueBox(
+    value = tcounts[3],
+    icon = "fa-notes-medical"
+  )
+})
+```
+
+Row {.tabset .tabset-fade}
+----------------------------------------------------------------
+
+### Total COVID-19 diagnosed by Country (click circles for numbers)
+
+```{r}
+renderLeaflet({
+  map = leaflet(countrytable) %>%
+    addTiles() %>%
+    setView(2.530401, 36.020884, zoom = 2) %>%
+    clearShapes() %>%
+    addCircles(lat = as.numeric(countrydata[['lat']]), lng = as.numeric(countrydata[['lng']]), radius = as.numeric(countrydata[['V2']]) * 20, color = 'Red', fill = TRUE, popup=paste(countrydata[['cname']],' total cases: ',countrydata[['V2']],sep=''))
+  map
+})
+```
+
+### Active cases by country
+
+```{r}
+# Get active cases
+COVID_data <- xml2::read_html("https://www.worldometers.info/coronavirus/", stringsAsFactors=FALSE)
+dat <- COVID_data %>%
+  html_node("table") %>%
+  html_table() 
+names(dat)[1] <- c("Country")
+dat <- apply(dat, 2, function(x) gsub("^$|^ $", NA, x))
+dat[is.na(dat)] <- 0
+dat_trans <- as.data.frame(t(dat))
+country_name = dat[,1]
+names(dat_trans) <- country_name
+active <- dat_trans[c("Country","ActiveCases"),]
+active <- as.data.frame(t(active))
+names(active) <- c("NAME","ActiveCases")
+active["ISO3"] <- countrycode(active$NAME, 'country.name', 'iso3c')
+active$ActiveCases <- as.numeric(gsub(",","",active$ActiveCases))
+active <- filter(active, NAME != c("Total:", "Diamond Princess)"))
+world_spdf <- readOGR( 
+  dsn= (".") , 
+  layer="TM_WORLD_BORDERS_SIMPL-0.3",
+  verbose=FALSE
+)
+world_spdf@data <- join(world_spdf@data, active, 
+                         by = "ISO3")
+world_spdf@data[,"ActiveCases"][is.na(world_spdf@data[,"ActiveCases"])] <- 0
+mytext <- paste(
+    "Area: ", world_spdf@data$NAME,"<br/>", 
+    "Active Cases: ", round(world_spdf@data$ActiveCases, 2), 
+    sep="") %>%
+  lapply(htmltools::HTML)
+mybins <- c(0,100,200,500,1000,Inf)
+mypalette <- colorBin( palette="YlOrBr", domain=world_spdf@data$ActiveCases, na.color="transparent", bins=mybins)
+
+# Plot active cases
+map1<-leaflet(world_spdf) %>%
+  addTiles() %>%
+  setView(lat=10, lng=0 , zoom=2) %>%
+  addPolygons(
+    fillColor = ~mypalette(ActiveCases), 
+    stroke=TRUE, 
+    fillOpacity = 0.9, 
+    color="white", 
+    weight=0.3,
+    label = mytext,
+    labelOptions = labelOptions( 
+      style = list("font-weight" = "normal", padding = "3px 8px"), 
+      textsize = "13px", 
+      direction = "auto")) %>%
+  addLegend(pal = mypalette, 
+            values = ~ActiveCases, 
+            position = "bottomright", 
+            title = "COVID-19 Active Cases") 
+map1
+```
+
+Trends
+===============================================================
+
+Row {.tabset .tabset-fade}
+-------------------------------------
+
+### Total Confirmed Cases
+
+```{r}
+# Data Trends
+daily_confirm = read.csv(url("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Confirmed.csv"))
+col_confirm = as.numeric(ncol(daily_confirm))
+daily_confirm <- daily_confirm[,5:col_confirm]
+names_col <- sub("X", "", colnames(daily_confirm)) 
+Dates_confirm <- substr(names_col, 1, 4)
+colnames(daily_confirm) <- Dates_confirm
+sum_confirm <- as.data.frame(colSums(daily_confirm, dims=1))
+sum_confirm  <- sum_confirm  %>% cbind(Dates_confirm)
+colnames(sum_confirm) <- c("Number", "Date")
+sum_confirm$Date <- factor(sum_confirm$Date, levels = sum_confirm$Date)
+daily_death = read.csv(url("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_19-covid-Deaths.csv"))
+col_death = as.numeric(ncol(daily_death))
+daily_death <- daily_death[,5:col_death]
+names_col_death <- sub("X", "", colnames(daily_death)) 
+Dates_death <- substr(names_col_death, 1, 4)
+colnames(daily_death) <- Dates_death
+sum_death <- as.data.frame(colSums(daily_death, dims=1))
+sum_death  <- sum_death  %>% cbind(Dates_death)
+colnames(sum_death) <- c("Number", "Date")
+sum_death$Date <- factor(sum_death$Date, levels = sum_death$Date)
+max_confirm <- sum_confirm[which.max(sum_confirm$Number),] 
+max_confirm <- max_confirm$Number
+min_confirm <- sum_confirm[which.min(sum_confirm$Number),] 
+min_confirm <- min_confirm$Number
+diff_confirm = ceiling((max_confirm - min_confirm) / 5)
+minors_confirm <-seq(min_confirm,max_confirm,by=diff_confirm)
+max_death <- sum_death[which.max(sum_death$Number),] 
+max_death <- max_death$Number
+min_death <- sum_death[which.min(sum_death$Number),] 
+min_death <- min_death$Number
+diff_death = ceiling((max_death - min_death) / 5)
+minors_death <-seq(min_death,max_death,by=diff_death)
+renderPlotly({
+  p <- ggplot(sum_confirm,
+             aes(x = Date, y = Number, group=1)) +
+             geom_point(shape=23, fill="black", color="black", size=1.5) +
+             geom_line(linetype="solid", color="red", size=0.5)+
+             ggtitle("Worldwide total confirmed cases by date") +
+             geom_hline(mapping=NULL, yintercept=minors_confirm,
+                        colour='grey80') +
+             expand_limits(x = 0, y = 0) +
+             theme(axis.text.x = element_text(angle = 90)) +
+             theme(panel.grid.major = element_blank(), panel.grid.minor =             element_blank(),
+panel.background = element_blank(),
+axis.line = element_line(colour = "grey"), axis.ticks = element_blank(),
+plot.title = element_text(color="black", size=14, face ="bold"),
+axis.title = element_text(color="black", size=12, face ="bold"))
+print(p)
+})
+```
+   
+### Total Deaths
+
+```{r}
+renderPlotly({
+  p <- ggplot(sum_death,
+             aes(x = Date, y = Number, group=1)) +
+             geom_point(shape=23, fill="black", color="black", size=1.5) +
+             geom_line(linetype="solid", color="red", size=0.5)+
+             ggtitle("Worldwide total deaths by date") +
+             geom_hline(mapping=NULL, yintercept=minors_death,
+                        colour='grey80') +
+             expand_limits(x = 0, y = 0) +
+             theme(axis.text.x = element_text(angle = 90)) +
+             theme(panel.grid.major = element_blank(), panel.grid.minor =             element_blank(),
+panel.background = element_blank(),
+axis.line = element_line(colour = "grey"), axis.ticks = element_blank(),
+plot.title = element_text(color="black", size=14, face ="bold"),
+axis.title = element_text(color="black", size=12, face ="bold"))
+print(p)
+})
+```
+
+Country
+===============================================================
+```{r}
+renderTable({
+  countrydata = countrydata[,-c(2,3,4)]
+  countrydata = countrydata[,-c(8,9)]
+  countrydata[countrydata==''] = 0
+  countrydata[['V2']] = as.numeric(countrydata[['V2']])
+  countrydata = countrydata[rev(order(countrydata[['V2']])),]
+  countrydata[['V2']] = as.character(countrydata[['V2']])
+  colnames(countrydata) = c('Country','Total Cases','New Cases','Total Deaths','New Deaths','Total Recovered','Active cases')
+  countrydata
+})
+```
+
+United States
+===============================================================
+
+```{r}
+renderPlotly({
+  fig <- plot_geo(usadfnew, locationmode = 'USA-states')
+  fig <- fig %>% add_trace(
+    z = ~Totalcase, color = ~Totalcase, colors = 'Reds',
+    text = ~hover, locations = ~code, marker = list(line = l)
+  )
+  fig <- fig %>% colorbar(title = 'case number')
+  fig <- fig %>% layout(
+    title = 'Coronavirus case in USA',
+    geo = g
+  )
+  fig
+})
+```
+
+Resources and Disclaimer
+===============================================================
+
+### Resources
+CDC COVID-19 website:  
+https://www.cdc.gov/coronavirus/2019-nCoV/index.html  
+
+Johns Hopkins CSSE COVID-19 Dashboard:  
+https://www.arcgis.com/apps/opsdashboard/index.html#/bda7594740fd40299423467b48e9ecf6  
+
+### Disclaimer
+This webpage is part of a course assignment, it is not official health information and should not be used as reference in any circumstances.  
+
+### References
+Case numbers:  
+https://www.worldometers.info/coronavirus/  
+
+Longitude and Latitude for each country:  
+https://developers.google.com/public-data/docs/canonical/countries_csv  
